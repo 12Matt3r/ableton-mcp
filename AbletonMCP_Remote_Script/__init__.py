@@ -131,75 +131,82 @@ class AbletonMCP(ControlSurface):
             self.log_message("Server thread error: " + str(e))
     
     def _handle_client(self, client):
-        """Handle communication with a connected client"""
+        """Handle communication with a connected client using newline-delimited JSON."""
         self.log_message("Client handler started")
-        client.settimeout(None)  # No timeout for client socket
-        buffer = ''  # Changed from b'' to '' for Python 2
-        
+        client.settimeout(None)
+        buffer = ''
+
         try:
             while self.running:
                 try:
-                    # Receive data
                     data = client.recv(8192)
-                    
                     if not data:
-                        # Client disconnected
                         self.log_message("Client disconnected")
                         break
-                    
-                    # Accumulate data in buffer with explicit encoding/decoding
+
                     try:
                         # Python 3: data is bytes, decode to string
                         buffer += data.decode('utf-8')
                     except AttributeError:
                         # Python 2: data is already string
                         buffer += data
-                    
-                    try:
-                        # Try to parse command from buffer
-                        command = json.loads(buffer)  # Removed decode('utf-8')
-                        buffer = ''  # Clear buffer after successful parse
-                        
-                        self.log_message("Received command: " + str(command.get("type", "unknown")))
-                        
-                        # Process the command and get response
-                        response = self._process_command(command)
-                        
-                        # Send the response with explicit encoding
+
+                    # Process all complete commands in the buffer
+                    while '\n' in buffer:
+                        command_str, buffer = buffer.split('\n', 1)
+                        if not command_str:
+                            continue
+
                         try:
-                            # Python 3: encode string to bytes
-                            client.sendall(json.dumps(response).encode('utf-8'))
-                        except AttributeError:
-                            # Python 2: string is already bytes
-                            client.sendall(json.dumps(response))
-                    except ValueError:
-                        # Incomplete data, wait for more
-                        continue
-                        
+                            command = json.loads(command_str)
+                            self.log_message("Received command: " + str(command.get("type", "unknown")))
+
+                            response = self._process_command(command)
+
+                            # Append newline to the response
+                            response_str = json.dumps(response) + '\n'
+
+                            try:
+                                # Python 3: encode string to bytes
+                                client.sendall(response_str.encode('utf-8'))
+                            except AttributeError:
+                                # Python 2: string is already bytes
+                                client.sendall(response_str)
+
+                        except ValueError as e:
+                            self.log_message("JSON Decode Error: " + str(e))
+                            error_response = { "status": "error", "message": "Invalid JSON received: " + str(e) }
+                            error_str = json.dumps(error_response) + '\n'
+                            try:
+                                client.sendall(error_str.encode('utf-8'))
+                            except AttributeError:
+                                client.sendall(error_str)
+                        except Exception as e:
+                            self.log_message("Error processing command: " + str(e))
+                            self.log_message(traceback.format_exc())
+                            error_response = { "status": "error", "message": "Error processing command: " + str(e) }
+                            error_str = json.dumps(error_response) + '\n'
+                            try:
+                                client.sendall(error_str.encode('utf-8'))
+                            except AttributeError:
+                                client.sendall(error_str)
+
+                except (socket.error, IOError) as e:
+                    self.log_message("Socket error in client handler: " + str(e))
+                    break # Exit the loop on socket errors
                 except Exception as e:
-                    self.log_message("Error handling client data: " + str(e))
+                    self.log_message("Unhandled error in client handler: " + str(e))
                     self.log_message(traceback.format_exc())
-                    
-                    # Send error response if possible
-                    error_response = {
-                        "status": "error",
-                        "message": str(e)
-                    }
                     try:
-                        # Python 3: encode string to bytes
-                        client.sendall(json.dumps(error_response).encode('utf-8'))
-                    except AttributeError:
-                        # Python 2: string is already bytes
-                        client.sendall(json.dumps(error_response))
+                        error_response = { "status": "error", "message": "An unexpected error occurred: " + str(e) }
+                        error_str = json.dumps(error_response) + '\n'
+                        client.sendall(error_str.encode('utf-8'))
                     except:
-                        # If we can't send the error, the connection is probably dead
-                        break
-                    
-                    # For serious errors, break the loop
-                    if not isinstance(e, ValueError):
-                        break
+                        pass
+                    break
+
         except Exception as e:
-            self.log_message("Error in client handler: " + str(e))
+            self.log_message("Critical error in client handler: " + str(e))
         finally:
             try:
                 client.close()
